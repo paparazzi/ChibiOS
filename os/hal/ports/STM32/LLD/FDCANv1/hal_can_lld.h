@@ -111,6 +111,11 @@
 #error "CAN driver activated but no FDCAN peripheral assigned"
 #endif
 
+#if !defined(STM32_FDCAN_SRAM_SIZE)
+#error "STM32_FDCAN_SRAM_SIZE not defined in registry"
+#endif
+
+#if defined(STM32G4XX)
 #if !defined(STM32_FDCAN_FLS_NBR)
 #error "STM32_FDCAN_FLS_NBR not defined in registry"
 #endif
@@ -142,6 +147,7 @@
 #if !defined(STM32_FDCAN_TM_NBR)
 #error "STM32_FDCAN_TM_NBR not defined in registry"
 #endif
+#endif /* STM32G4XX */
 
 /*===========================================================================*/
 /* Driver data structures and types.                                         */
@@ -330,10 +336,53 @@ typedef struct hal_can_config {
    * @brief   Test configuration register.
    */
   uint32_t                  TEST;
+#if defined(STM32G4XX)
   /**
    * @brief   Global filter configuration register.
    */
   uint32_t                  RXGFC;
+#else
+  /**
+   * @brief   Global filter configuration register.
+   */
+  uint32_t                  GFC;
+  /**
+   * @brief   Standard ID filter configuration register.
+   */
+  uint32_t                  SIDFC;
+  /**
+   * @brief   Extended ID filter configuration register.
+   */
+  uint32_t                  XIDFC;
+  /**
+   * @brief   Rx FIFO 0 configuration register.
+   */
+  uint32_t                  RXF0C;
+  /**
+   * @brief   Rx FIFO 1 configuration register.
+   */
+  uint32_t                  RXF1C;
+  /**
+   * @brief   Rx buffer configuration register.
+   */
+  uint32_t                  RXBC;
+  /**
+   * @brief   Tx event FIFO configuration register.
+   */
+  uint32_t                  TXEFC;
+  /**
+   * @brief   Tx buffer configuration register.
+   */
+  uint32_t                  TXBC;
+  /**
+   * @brief   Rx buffer element size configuration register.
+   */
+  uint32_t                  RXESC;
+  /**
+   * @brief   Tx buffer element size configuration register.
+   */
+  uint32_t                  TXESC;
+#endif  /* STM32G4XX */
 } CANConfig;
 
 /**

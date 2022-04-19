@@ -138,6 +138,7 @@
 #define STM32_FDCAN_TEF_NBR                 3U
 #define STM32_FDCAN_TB_NBR                  3U
 #define STM32_FDCAN_TM_NBR                  0U
+#define STM32_FDCAN_SRAM_SIZE               2544U
 
 /* DAC attributes.*/
 #define STM32_HAS_DAC1_CH1                  TRUE
@@ -357,6 +358,7 @@
 #define STM32_FDCAN_TEF_NBR                 3U
 #define STM32_FDCAN_TB_NBR                  3U
 #define STM32_FDCAN_TM_NBR                  0U
+#define STM32_FDCAN_SRAM_SIZE               1696U
 
 /* DAC attributes.*/
 #define STM32_HAS_DAC1_CH1                  TRUE
@@ -576,6 +578,7 @@
 #define STM32_FDCAN_TEF_NBR                 3U
 #define STM32_FDCAN_TB_NBR                  3U
 #define STM32_FDCAN_TM_NBR                  0U
+#define STM32_FDCAN_SRAM_SIZE               848U
 
 /* DAC attributes.*/
 #define STM32_HAS_DAC1_CH1                  TRUE
