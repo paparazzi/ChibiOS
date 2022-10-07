@@ -224,6 +224,39 @@ static void i2c_lld_abort_operation(I2CDriver *i2cp) {
 }
 
 /**
+ * @brief   reset I2C peripheral
+ *
+ * @param[in] i2cp      pointer to the @p I2CDriver object
+ *
+ * @notapi
+ */
+static void i2c_lld_reset(I2CDriver *i2cp) {
+#if STM32_I2C_USE_I2C1
+    if (&I2CD1 == i2cp) {
+      rccResetI2C1();
+    }
+#endif /* STM32_I2C_USE_I2C1 */
+
+#if STM32_I2C_USE_I2C2
+    if (&I2CD2 == i2cp) {
+      rccResetI2C2();
+    }
+#endif /* STM32_I2C_USE_I2C2 */
+
+#if STM32_I2C_USE_I2C3
+    if (&I2CD3 == i2cp) {
+      rccResetI2C3();
+    }
+#endif /* STM32_I2C_USE_I2C3 */
+
+#if STM32_I2C_USE_I2C4
+    if (&I2CD4 == i2cp) {
+      rccResetI2C4();
+    }
+#endif  /* STM32_I2C_USE_I2C4 */
+}
+
+/**
  * @brief   I2C shared ISR code.
  *
  * @param[in] i2cp      pointer to the @p I2CDriver object
@@ -233,6 +266,13 @@ static void i2c_lld_abort_operation(I2CDriver *i2cp) {
  */
 static void i2c_lld_serve_interrupt(I2CDriver *i2cp, uint32_t isr) {
   I2C_TypeDef *dp = i2cp->i2c;
+
+  if (!i2cp->in_transaction) {
+      // unexpected interrupt generated due to bus noise
+      dp->CR1 &= ~(I2C_CR1_TCIE | I2C_CR1_TXIE | I2C_CR1_RXIE);
+      i2c_lld_reset(i2cp);
+      return;
+  }
 
   /* Special case of a received NACK, the transfer is aborted.*/
   if ((isr & I2C_ISR_NACKF) != 0U) {
@@ -360,17 +400,28 @@ static void i2c_lld_serve_interrupt(I2CDriver *i2cp, uint32_t isr) {
  */
 static void i2c_lld_serve_error_interrupt(I2CDriver *i2cp, uint32_t isr) {
 
+  if (!i2cp->in_transaction) {
+      // unexpected interrupt generated due to bus noise
+      i2cp->i2c->CR1 &= ~(I2C_CR1_TCIE | I2C_CR1_TXIE | I2C_CR1_RXIE);
+      i2c_lld_reset(i2cp);
+      return;
+  }
+
 #if STM32_I2C_USE_DMA == TRUE
   /* Clears DMA interrupt flags just to be safe.*/
-  dmaStreamDisable(i2cp->dmatx);
-  dmaStreamDisable(i2cp->dmarx);
+  if (i2cp->dmatx)
+      dmaStreamDisable(i2cp->dmatx);
+  if (i2cp->dmarx)
+      dmaStreamDisable(i2cp->dmarx);
 #else
   /* Disabling RX and TX interrupts.*/
   i2cp->i2c->CR1 &= ~(I2C_CR1_TXIE | I2C_CR1_RXIE);
 #endif
 
-  if (isr & I2C_ISR_BERR)
+  if (isr & I2C_ISR_BERR) {
     i2cp->errors |= I2C_BUS_ERROR;
+    i2cp->i2c->ISR &= ~I2C_ISR_BERR;
+  }
 
   if (isr & I2C_ISR_ARLO)
     i2cp->errors |= I2C_ARBITRATION_LOST;
@@ -390,6 +441,30 @@ static void i2c_lld_serve_error_interrupt(I2CDriver *i2cp, uint32_t isr) {
 /* Driver interrupt handlers.                                                */
 /*===========================================================================*/
 
+/**
+ * check if ISR count limit has been exceeded for the current
+ * opration. This check will prevent interrupt storms in case the
+ * peripheral is behaving badly enough to cause unexpected interrupts
+ * and normal interrupt acknowledgement doesn't work
+ */
+static bool i2c_lld_check_isr_limit(I2CDriver *i2cp) {
+#ifdef STM32_I2C_ISR_LIMIT
+    if (i2cp->isr_count++ > i2cp->isr_limit) {
+        i2cp->errors |= I2C_ISR_LIMIT;
+        i2c_lld_reset(i2cp);
+#if STM32_I2C_USE_DMA == TRUE
+        if (i2cp->dmatx)
+            dmaStreamDisable(i2cp->dmatx);
+        if (i2cp->dmarx)
+            dmaStreamDisable(i2cp->dmarx);
+#endif // STM32_I2C_USE_DMA
+        _i2c_wakeup_error_isr(i2cp);
+        return true;
+    }
+#endif // STM32_I2C_ISR_LIMIT
+    return false;
+}
+
 #if STM32_I2C_USE_I2C1 || defined(__DOXYGEN__)
 #if defined(STM32_I2C1_GLOBAL_HANDLER) || defined(__DOXYGEN__)
 /**
@@ -401,6 +476,11 @@ OSAL_IRQ_HANDLER(STM32_I2C1_GLOBAL_HANDLER) {
   uint32_t isr = I2CD1.i2c->ISR;
 
   OSAL_IRQ_PROLOGUE();
+
+  if (i2c_lld_check_isr_limit(&I2CD1)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
 
   /* Clearing IRQ bits.*/
   I2CD1.i2c->ICR = isr;
@@ -419,6 +499,11 @@ OSAL_IRQ_HANDLER(STM32_I2C1_EVENT_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD1)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD1.i2c->ICR = isr & I2C_INT_MASK;
 
@@ -431,6 +516,11 @@ OSAL_IRQ_HANDLER(STM32_I2C1_ERROR_HANDLER) {
   uint32_t isr = I2CD1.i2c->ISR;
 
   OSAL_IRQ_PROLOGUE();
+
+  if (i2c_lld_check_isr_limit(&I2CD1)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
 
   /* Clearing IRQ bits.*/
   I2CD1.i2c->ICR = isr & I2C_ERROR_MASK;
@@ -457,6 +547,11 @@ OSAL_IRQ_HANDLER(STM32_I2C2_GLOBAL_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD2)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD2.i2c->ICR = isr;
 
@@ -474,6 +569,11 @@ OSAL_IRQ_HANDLER(STM32_I2C2_EVENT_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD2)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD2.i2c->ICR = isr & I2C_INT_MASK;
 
@@ -486,6 +586,11 @@ OSAL_IRQ_HANDLER(STM32_I2C2_ERROR_HANDLER) {
   uint32_t isr = I2CD2.i2c->ISR;
 
   OSAL_IRQ_PROLOGUE();
+
+  if (i2c_lld_check_isr_limit(&I2CD2)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
 
   /* Clearing IRQ bits.*/
   I2CD2.i2c->ICR = isr & I2C_ERROR_MASK;
@@ -512,6 +617,11 @@ OSAL_IRQ_HANDLER(STM32_I2C3_GLOBAL_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD3)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD3.i2c->ICR = isr;
 
@@ -529,6 +639,11 @@ OSAL_IRQ_HANDLER(STM32_I2C3_EVENT_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD3)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD3.i2c->ICR = isr & I2C_INT_MASK;
 
@@ -541,6 +656,11 @@ OSAL_IRQ_HANDLER(STM32_I2C3_ERROR_HANDLER) {
   uint32_t isr = I2CD3.i2c->ISR;
 
   OSAL_IRQ_PROLOGUE();
+
+  if (i2c_lld_check_isr_limit(&I2CD3)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
 
   /* Clearing IRQ bits.*/
   I2CD3.i2c->ICR = isr & I2C_ERROR_MASK;
@@ -567,6 +687,11 @@ OSAL_IRQ_HANDLER(STM32_I2C4_GLOBAL_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD4)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD4.i2c->ICR = isr;
 
@@ -584,6 +709,11 @@ OSAL_IRQ_HANDLER(STM32_I2C4_EVENT_HANDLER) {
 
   OSAL_IRQ_PROLOGUE();
 
+  if (i2c_lld_check_isr_limit(&I2CD4)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
+
   /* Clearing IRQ bits.*/
   I2CD4.i2c->ICR = isr & I2C_INT_MASK;
 
@@ -596,6 +726,11 @@ OSAL_IRQ_HANDLER(STM32_I2C4_ERROR_HANDLER) {
   uint32_t isr = I2CD4.i2c->ISR;
 
   OSAL_IRQ_PROLOGUE();
+
+  if (i2c_lld_check_isr_limit(&I2CD4)) {
+      OSAL_IRQ_EPILOGUE();
+      return;
+  }
 
   /* Clearing IRQ bits.*/
   I2CD4.i2c->ICR = isr & I2C_ERROR_MASK;
@@ -982,6 +1117,11 @@ msg_t i2c_lld_master_receive_timeout(I2CDriver *i2cp, i2caddr_t addr,
   /* Releases the lock from high level driver.*/
   osalSysUnlock();
 
+#ifdef STM32_I2C_ISR_LIMIT
+  i2cp->isr_limit = rxbytes * STM32_I2C_ISR_LIMIT;
+  i2cp->isr_count = 0;
+#endif // STM32_I2C_ISR_LIMIT
+
 #if STM32_I2C_USE_DMA == TRUE
   /* RX DMA setup.*/
   dmaStreamSetMode(i2cp->dmarx, i2cp->rxdmamode);
@@ -1015,6 +1155,8 @@ msg_t i2c_lld_master_receive_timeout(I2CDriver *i2cp, i2caddr_t addr,
     osalSysUnlock();
   }
 
+  i2cp->in_transaction = true;
+
   /* Setting up the slave address.*/
   i2c_lld_set_address(i2cp, addr);
 
@@ -1047,6 +1189,12 @@ msg_t i2c_lld_master_receive_timeout(I2CDriver *i2cp, i2caddr_t addr,
     dmaStreamDisable(i2cp->dmarx);
 #endif
   }
+
+#if STM32_I2C_USE_DMA == TRUE
+  dmaStreamDisable(i2cp->dmarx);
+#endif
+
+  i2cp->in_transaction = false;
 
   return msg;
 }
@@ -1088,6 +1236,11 @@ msg_t i2c_lld_master_transmit_timeout(I2CDriver *i2cp, i2caddr_t addr,
   /* Releases the lock from high level driver.*/
   osalSysUnlock();
 
+#ifdef STM32_I2C_ISR_LIMIT
+  i2cp->isr_limit = (txbytes + rxbytes) * STM32_I2C_ISR_LIMIT;
+  i2cp->isr_count = 0;
+#endif
+  
 #if STM32_I2C_USE_DMA == TRUE
   /* TX DMA setup.*/
   dmaStreamSetMode(i2cp->dmatx, i2cp->txdmamode);
@@ -1128,6 +1281,8 @@ msg_t i2c_lld_master_transmit_timeout(I2CDriver *i2cp, i2caddr_t addr,
     osalSysUnlock();
   }
 
+  i2cp->in_transaction = true;
+
   /* Setting up the slave address.*/
   i2c_lld_set_address(i2cp, addr);
 
@@ -1160,6 +1315,13 @@ msg_t i2c_lld_master_transmit_timeout(I2CDriver *i2cp, i2caddr_t addr,
     dmaStreamDisable(i2cp->dmatx);
 #endif
   }
+
+#if STM32_I2C_USE_DMA == TRUE
+  dmaStreamDisable(i2cp->dmatx);
+  dmaStreamDisable(i2cp->dmarx);
+#endif
+
+  i2cp->in_transaction = false;
 
   return msg;
 }
