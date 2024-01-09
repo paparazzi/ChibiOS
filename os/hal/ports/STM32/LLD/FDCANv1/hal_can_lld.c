@@ -30,6 +30,7 @@
 /* Driver local definitions.                                                 */
 /*===========================================================================*/
 
+#if defined(STM32G4XX)
 /* Filter Standard Element Size in bytes.*/
 #define SRAMCAN_FLS_SIZE                (1U * 4U)
 
@@ -85,9 +86,31 @@
 #define SRAMCAN_TMSA  ((uint32_t)(SRAMCAN_TBSA +                            \
                                   (STM32_FDCAN_TB_NBR * SRAMCAN_TB_SIZE)))
 
-/* Message RAM size.*/
-#define SRAMCAN_SIZE  ((uint32_t)(SRAMCAN_TMSA +                            \
+/* Message RAM stride.*/
+#define SRAMCAN_STRIDE  ((uint32_t)(SRAMCAN_TMSA +                            \
                                   (STM32_FDCAN_TM_NBR * SRAMCAN_TM_SIZE)))
+#else
+/* Message RAM stride is 0 because it is shared.*/
+#define SRAMCAN_STRIDE  0
+
+/* RX FIFO 0 Start Address.*/
+#define SRAMCAN_RF0SA(fdcan)      ((fdcan->RXF0C & FDCAN_RXF0C_F0SA) >> FDCAN_RXF0C_F0SA_Pos)
+
+/* RX FIFO 0 Size */
+#define SRAMCAN_RF0_SIZE(fdcan)   bfs_to_element_size[((fdcan->RXESC & FDCAN_RXESC_F0DS) >> FDCAN_RXESC_F0DS_Pos)]
+
+/* RX FIFO 1 Start Address.*/
+#define SRAMCAN_RF1SA(fdcan)      ((fdcan->RXF1C & FDCAN_RXF1C_F1SA) >> FDCAN_RXF1C_F1SA_Pos)
+
+/* RX FIFO 1 Size */
+#define SRAMCAN_RF1_SIZE(fdcan)   bfs_to_element_size[((fdcan->RXESC & FDCAN_RXESC_F1DS) >> FDCAN_RXESC_F1DS_Pos)]
+
+/* TX Buffers Start Address.*/
+#define SRAMCAN_TBSA(fdcan)       ((fdcan->TXBC & FDCAN_TXBC_TBSA) >> FDCAN_TXBC_TBSA_Pos)
+
+/* TX Buffers Size */
+#define SRAMCAN_TB_SIZE(fdcan)     bfs_to_element_size[((fdcan->TXESC & FDCAN_TXESC_TBDS) >> FDCAN_TXESC_TBDS_Pos)]
+#endif /* STM32G4XX */
 
 #define TIMEOUT_INIT_MS                 250U
 #define TIMEOUT_CSA_MS                  250U
@@ -118,6 +141,9 @@ CANDriver CAND3;
 static const uint8_t dlc_to_bytes[] = {
   0U,  1U,  2U,  3U,  4U,  5U,  6U,  7U,
   8U, 12U, 16U, 20U, 24U, 32U, 48U, 64U
+};
+static const uint8_t bfs_to_element_size[] = {
+  4U,  5U,  6U,  7U,  8U, 10U, 14U, 18U
 };
 
 static uint32_t canclk;
@@ -201,41 +227,21 @@ void can_lld_init(void) {
   /* Driver initialization.*/
   canObjectInit(&CAND1);
   CAND1.fdcan = FDCAN1;
-  CAND1.ram_base = (uint32_t *)(SRAMCAN_BASE + 0U * SRAMCAN_SIZE);
+  CAND1.ram_base = (uint32_t *)(SRAMCAN_BASE + 0U * SRAMCAN_STRIDE);
 #endif
 
 #if STM32_CAN_USE_FDCAN2
   /* Driver initialization.*/
   canObjectInit(&CAND2);
   CAND2.fdcan = FDCAN2;
-  CAND2.ram_base = (uint32_t *)(SRAMCAN_BASE + 1U * SRAMCAN_SIZE);
+  CAND2.ram_base = (uint32_t *)(SRAMCAN_BASE + 1U * SRAMCAN_STRIDE);
 #endif
 
 #if STM32_CAN_USE_FDCAN3
   /* Driver initialization.*/
   canObjectInit(&CAND3);
   CAND3.fdcan = FDCAN3;
-  CAND3.ram_base = (uint32_t *)(SRAMCAN_BASE + 2U * SRAMCAN_SIZE);
-#endif
-
-  /* Configure global CKDIV for STM32G4XX */
-#if defined(STM32G4XX) && STM32_CAN_CKDIV != 0
-  /* CAND1 needs to be put into configuration mode to allow CKDIV configuration */
-  rccEnableFDCAN(true);
-  if (fdcan_clock_stop(&CAND1)) {
-    osalDbgAssert(false, "CAN clock stop failed, check clocks and pin config");
-    return;
-  }
-  if (fdcan_init_mode(&CAND1)) {
-    osalDbgAssert(false, "CAN initialization failed, check clocks and pin config");
-    return;
-  }
-  CAND1.fdcan->CCCR |= FDCAN_CCCR_CCE;
-
-  /* Write actual configuration into CKDIV register */
-  FDCAN_CONFIG->CKDIV = STM32_CAN_CKDIV;
-
-  rccDisableFDCAN();
+  CAND3.ram_base = (uint32_t *)(SRAMCAN_BASE + 2U * SRAMCAN_STRIDE);
 #endif
 }
 
@@ -257,8 +263,8 @@ bool can_lld_start(CANDriver *canp) {
   /* If it is the first activation then performing some extra
      initializations.*/
   if (canclk == 0U) {
-    for (uint32_t *wp = canp->ram_base;
-         wp < canp->ram_base + SRAMCAN_SIZE;
+    for (uint32_t *wp = (uint32_t *)SRAMCAN_BASE;
+         wp < (uint32_t *)(SRAMCAN_BASE + STM32_FDCAN_SRAM_SIZE);
          wp += 1U) {
       *wp = (uint32_t)0U;
     }
@@ -306,7 +312,24 @@ bool can_lld_start(CANDriver *canp) {
   if (canp->config->CCCR & FDCAN_CCCR_TEST) {
 	  canp->fdcan->TEST = canp->config->TEST;
   }
-  canp->fdcan->RXGFC  = canp->config->RXGFC;
+
+#if defined(STM32G4XX)
+  canp->fdcan->RXGFC = canp->config->RXGFC;
+  canp->fdcan->TXBC  = 0;
+#else
+  canp->fdcan->GFC   = canp->config->GFC;
+
+  /* H7 version of FDCAN has configurable memory layout, so configure it */
+  canp->fdcan->SIDFC = canp->config->SIDFC;
+  canp->fdcan->XIDFC = canp->config->XIDFC;
+  canp->fdcan->RXF0C = canp->config->RXF0C;
+  canp->fdcan->RXF1C = canp->config->RXF1C;
+  canp->fdcan->RXBC  = canp->config->RXBC;
+  canp->fdcan->TXEFC = canp->config->TXEFC;
+  canp->fdcan->TXBC  = canp->config->TXBC;
+  canp->fdcan->RXESC = canp->config->RXESC;
+  canp->fdcan->TXESC = canp->config->TXESC;
+#endif /* STM32G4XX */
 
   /* Start clock and disable configuration mode.*/
   canp->fdcan->CCCR &= ~(FDCAN_CCCR_CSR | FDCAN_CCCR_INIT);
@@ -412,8 +435,13 @@ void can_lld_transmit(CANDriver *canp, canmbx_t mailbox, const CANTxFrame *ctfp)
   put_index = ((canp->fdcan->TXFQS & FDCAN_TXFQS_TFQPI) >> FDCAN_TXFQS_TFQPI_Pos);
 
   /* Writing frame.*/
+#if defined(STM32G4XX)
   tx_address = canp->ram_base +
                ((SRAMCAN_TBSA + (put_index * SRAMCAN_TB_SIZE)) / sizeof (uint32_t));
+#else
+  tx_address = canp->ram_base +
+               ((SRAMCAN_TBSA(canp->fdcan) + (put_index * SRAMCAN_TB_SIZE(canp->fdcan))));
+#endif /* STM32G4XX */
 
   *tx_address++ = ctfp->header32[0];
   *tx_address++ = ctfp->header32[1];
@@ -480,14 +508,24 @@ void can_lld_receive(CANDriver *canp, canmbx_t mailbox, CANRxFrame *crfp) {
   if (mailbox == 1U) {
      /* GET index RXF0, add it and the length to the rx_address.*/
      get_index = (canp->fdcan->RXF0S & FDCAN_RXF0S_F0GI_Msk) >> FDCAN_RXF0S_F0GI_Pos;
+#if defined(STM32G4XX)
      rx_address = canp->ram_base + (SRAMCAN_RF0SA +
                                     (get_index * SRAMCAN_RF0_SIZE)) / sizeof (uint32_t);
+#else
+     rx_address = canp->ram_base + (SRAMCAN_RF0SA(canp->fdcan) +
+                                    (get_index * SRAMCAN_RF0_SIZE(canp->fdcan)));
+#endif /* STM32G4XX */
   }
   else {
      /* GET index RXF1, add it and the length to the rx_address.*/
      get_index = (canp->fdcan->RXF1S & FDCAN_RXF1S_F1GI_Msk) >> FDCAN_RXF1S_F1GI_Pos;
+#if defined(STM32G4XX)
      rx_address = canp->ram_base + (SRAMCAN_RF1SA +
                                     (get_index * SRAMCAN_RF1_SIZE)) / sizeof (uint32_t);
+#else
+     rx_address = canp->ram_base + (SRAMCAN_RF1SA(canp->fdcan) +
+                                    (get_index * SRAMCAN_RF1_SIZE(canp->fdcan)));
+#endif /* STM32G4XX */
   }
   crfp->header32[0] = *rx_address++;
   crfp->header32[1] = *rx_address++;
